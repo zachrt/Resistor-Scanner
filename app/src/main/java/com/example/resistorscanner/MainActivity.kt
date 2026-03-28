@@ -21,6 +21,7 @@ import android.util.Log
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 
 enum class ResistorColor(val value: Int, val multiplier: Double, val tolerance: Double?) {
     BLACK(0, 1.0, null),
@@ -67,12 +68,12 @@ class MainActivity : AppCompatActivity() {
     private var imageCapture: ImageCapture? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Fix the overlap here
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
 
