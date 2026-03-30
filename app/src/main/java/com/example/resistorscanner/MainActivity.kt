@@ -40,26 +40,20 @@ enum class ResistorColor(val value: Int, val multiplier: Double, val tolerance: 
 }
 
 fun ImageProxy.toBitmap(): Bitmap {
+    val rotationDegrees = this.imageInfo.rotationDegrees // Get the actual sensor rotation
     val buffer = planes[0].buffer
     val bytes = ByteArray(buffer.remaining())
     buffer.get(bytes)
 
-    // 1. Decode the original "sideways" image
     val originalBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
 
-    // 2. Prepare a matrix to rotate it 90 degrees clockwise
-    val matrix = android.graphics.Matrix()
-    matrix.postRotate(90f)
-
-    // 3. Create a NEW bitmap that is physically upright
-    return Bitmap.createBitmap(
-        originalBitmap,
-        0, 0,
-        originalBitmap.width,
-        originalBitmap.height,
-        matrix,
-        true
-    )
+    return if (rotationDegrees != 0) {
+        val matrix = android.graphics.Matrix()
+        matrix.postRotate(rotationDegrees.toFloat())
+        Bitmap.createBitmap(originalBitmap, 0, 0, originalBitmap.width, originalBitmap.height, matrix, true)
+    } else {
+        originalBitmap
+    }
 }
 
 class MainActivity : AppCompatActivity() {
@@ -172,6 +166,28 @@ class MainActivity : AppCompatActivity() {
 
                         binding.captureButton.visibility = android.view.View.GONE
                         binding.retryButton.visibility = android.view.View.VISIBLE
+                        binding.colorPreviewContainer.visibility = android.view.View.VISIBLE
+
+                        val bands = listOf(binding.band1, binding.band2, binding.band3, binding.band4)
+// Hide all initially
+                        bands.forEach { it.visibility = android.view.View.GONE }
+
+                        detectedColors.forEachIndexed { index, color ->
+                            if (index < bands.size) {
+                                bands[index].visibility = android.view.View.VISIBLE
+                                // Convert your Enum color to an actual Android Color Int
+                                bands[index].setBackgroundColor(android.graphics.Color.rgb(
+                                    getStandardRGB(color)[0],
+                                    getStandardRGB(color)[1],
+                                    getStandardRGB(color)[2]
+                                ))
+
+                                // Add the "Touch to see value" Toast
+                                bands[index].setOnClickListener {
+                                    Toast.makeText(this@MainActivity, "${color.name}: ${color.value}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
                     }
                 }
                 override fun onError(exception: ImageCaptureException) {
@@ -184,6 +200,7 @@ class MainActivity : AppCompatActivity() {
         binding.viewFinder.visibility = android.view.View.VISIBLE
         binding.resultImageView.visibility = android.view.View.GONE
         binding.resultText.visibility = android.view.View.GONE // Hide the numbers
+        binding.colorPreviewContainer.visibility = android.view.View.GONE
         binding.captureButton.visibility = android.view.View.VISIBLE
         binding.retryButton.visibility = android.view.View.GONE
     }

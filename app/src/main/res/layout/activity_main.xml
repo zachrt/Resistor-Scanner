@@ -40,6 +40,19 @@
             android:text="Auto Capture"
             android:textColor="#FFFFFF"
             android:textSize="16sp" />
+        <LinearLayout
+            android:id="@+id/colorPreviewContainer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="16dp"
+            android:visibility="gone">
+
+            <View android:id="@+id/band1" android:layout_width="30dp" android:layout_height="30dp" android:layout_margin="4dp" android:background="#000000"/>
+            <View android:id="@+id/band2" android:layout_width="30dp" android:layout_height="30dp" android:layout_margin="4dp" android:background="#000000"/>
+            <View android:id="@+id/band3" android:layout_width="30dp" android:layout_height="30dp" android:layout_margin="4dp" android:background="#000000"/>
+            <View android:id="@+id/band4" android:layout_width="30dp" android:layout_height="30dp" android:layout_margin="4dp" android:background="#000000"/>
+        </LinearLayout>
         <TextView
             android:id="@+id/resultText"
             android:layout_width="wrap_content"
