@@ -19,7 +19,6 @@ import androidx.camera.core.ImageProxy
 import com.example.resistorscanner.databinding.ActivityMainBinding
 import android.util.Log
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 
@@ -36,23 +35,21 @@ enum class ResistorColor(val value: Int, val multiplier: Double, val tolerance: 
     WHITE(9, 1000000000.0, null),
     GOLD(-1, 0.1, 5.0),
     SILVER(-1, 0.01, 10.0),
-    BODY(-2, 0.0, null) // Placeholder for the background
+    BODY(-2, 0.0, null)
 }
 
-fun ImageProxy.toBitmap(): Bitmap {
-    val rotationDegrees = this.imageInfo.rotationDegrees // Get the actual sensor rotation
-    val buffer = planes[0].buffer
-    val bytes = ByteArray(buffer.remaining())
-    buffer.get(bytes)
-
-    val originalBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+fun ImageProxy.toCorrectBitmap(): Bitmap {
+    val rotationDegrees = this.imageInfo.rotationDegrees
+    val bmp = this.toBitmap()
 
     return if (rotationDegrees != 0) {
-        val matrix = android.graphics.Matrix()
+        val matrix = Matrix()
         matrix.postRotate(rotationDegrees.toFloat())
-        Bitmap.createBitmap(originalBitmap, 0, 0, originalBitmap.width, originalBitmap.height, matrix, true)
+        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+        bmp.recycle()
+        rotated
     } else {
-        originalBitmap
+        bmp
     }
 }
 
@@ -70,9 +67,7 @@ class MainActivity : AppCompatActivity() {
 
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-
             binding.controlsContainer.setPadding(0, 0, 0, systemBars.bottom)
-
             insets
         }
 
@@ -83,7 +78,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.captureButton.setOnClickListener {
-            Log.d("ScannerApp", "Button was physically pressed!")
             takePhoto()
         }
         binding.retryButton.setOnClickListener {
@@ -97,31 +91,20 @@ class MainActivity : AppCompatActivity() {
         cameraProviderFuture.addListener({
             val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
 
-            // 1. Setup Preview
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(binding.viewFinder.surfaceProvider)
             }
 
-            // 2. Setup ImageCapture (Crucial!)
             imageCapture = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setTargetRotation(binding.viewFinder.display.rotation)
                 .build()
 
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
             try {
                 cameraProvider.unbindAll()
-
-                // 3. YOU MUST INCLUDE BOTH 'preview' AND 'imageCapture' HERE
-                cameraProvider.bindToLifecycle(
-                    this,
-                    cameraSelector,
-                    preview,
-                    imageCapture // <--- If this is missing, the button won't work!
-                )
-
-                Log.d("ScannerApp", "Camera and Capture bound successfully!")
-
+                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageCapture)
             } catch (exc: Exception) {
                 Log.e("ScannerApp", "Use case binding failed", exc)
             }
@@ -139,8 +122,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private var lastCapturedImage: android.graphics.Bitmap? = null
-
     private fun takePhoto() {
         val imageCapture = imageCapture ?: return
 
@@ -148,18 +129,22 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
-                    val fullBitmap = image.toBitmap()
+                    val fullBitmap = image.toCorrectBitmap()
                     val croppedBitmap = cropToReticle(fullBitmap)
                     image.close()
 
                     // THE REAL SCAN HAPPENS HERE
-                    val detectedColors = scanImageForColors(croppedBitmap)
+                    // We update scanImageForColors to return the list AND the visual mask
+                    val (detectedColors, maskedBitmap) = scanImageForColors(croppedBitmap)
                     val resultText = calculateResistance(detectedColors)
 
                     runOnUiThread {
                         binding.viewFinder.visibility = android.view.View.GONE
                         binding.resultImageView.visibility = android.view.View.VISIBLE
-                        binding.resultImageView.setImageBitmap(croppedBitmap)
+
+                        // NEW: Show the MASKED image (black background)
+                        // This lets you see exactly what the computer analysed.
+                        binding.resultImageView.setImageBitmap(maskedBitmap)
 
                         binding.resultText.text = resultText
                         binding.resultText.visibility = android.view.View.VISIBLE
@@ -169,20 +154,16 @@ class MainActivity : AppCompatActivity() {
                         binding.colorPreviewContainer.visibility = android.view.View.VISIBLE
 
                         val bands = listOf(binding.band1, binding.band2, binding.band3, binding.band4)
-// Hide all initially
                         bands.forEach { it.visibility = android.view.View.GONE }
 
                         detectedColors.forEachIndexed { index, color ->
                             if (index < bands.size) {
                                 bands[index].visibility = android.view.View.VISIBLE
-                                // Convert your Enum color to an actual Android Color Int
                                 bands[index].setBackgroundColor(android.graphics.Color.rgb(
                                     getStandardRGB(color)[0],
                                     getStandardRGB(color)[1],
                                     getStandardRGB(color)[2]
                                 ))
-
-                                // Add the "Touch to see value" Toast
                                 bands[index].setOnClickListener {
                                     Toast.makeText(this@MainActivity, "${color.name}: ${color.value}", Toast.LENGTH_SHORT).show()
                                 }
@@ -196,60 +177,73 @@ class MainActivity : AppCompatActivity() {
             }
         )
     }
+
     private fun resetCamera() {
         binding.viewFinder.visibility = android.view.View.VISIBLE
         binding.resultImageView.visibility = android.view.View.GONE
-        binding.resultText.visibility = android.view.View.GONE // Hide the numbers
+        binding.resultText.visibility = android.view.View.GONE
         binding.colorPreviewContainer.visibility = android.view.View.GONE
         binding.captureButton.visibility = android.view.View.VISIBLE
         binding.retryButton.visibility = android.view.View.GONE
     }
-    private fun cropToReticle(bitmap: Bitmap): Bitmap {
-        val viewFinder = binding.viewFinder
-        val reticle = binding.reticle
 
-        // 1. Get the scaling factor between the Bitmap and the ViewFinder
-        val scaleX = bitmap.width.toFloat() / viewFinder.width
-        val scaleY = bitmap.height.toFloat() / viewFinder.height
+    private fun cropToReticle(fullBitmap: Bitmap): Bitmap {
+        val width = fullBitmap.width
+        val height = fullBitmap.height
 
-        // 2. Calculate the Reticle's position relative to the ViewFinder
-        val cropWidth = (reticle.width * scaleX).toInt()
-        val cropHeight = (reticle.height * scaleY).toInt()
+        // --- THE PANORAMIC CROP ---
+        // 0.98f = Keep 98% of the image width (Left to Right)
+        // 0.20f = Keep only the middle 20% of the image height (Top to Bottom)
+        val boxWidthPercentage = 0.98f
+        val boxHeightPercentage = 0.20f
 
-        // Center the crop based on the reticle's location
-        val cropLeft = ((reticle.left + (reticle.width / 2)) * scaleX - (cropWidth / 2)).toInt()
-        val cropTop = ((reticle.top + (reticle.height / 2)) * scaleY - (cropHeight / 2)).toInt()
+        val cropWidth = (width * boxWidthPercentage).toInt()
+        val cropHeight = (height * boxHeightPercentage).toInt()
 
-        // 3. Safety check: Ensure crop boundaries are within the bitmap
-        val left = cropLeft.coerceIn(0, bitmap.width - cropWidth)
-        val top = cropTop.coerceIn(0, bitmap.height - cropHeight)
+        // Calculate the exact center starting coordinates
+        val cropStartX = (width - cropWidth) / 2
+        val cropStartY = (height - cropHeight) / 2
 
-        return Bitmap.createBitmap(bitmap, left, top, cropWidth, cropHeight)
+        // Carve out the horizontal strip and return it
+        return Bitmap.createBitmap(
+            fullBitmap,
+            cropStartX,
+            cropStartY,
+            cropWidth,
+            cropHeight
+        )
     }
+
     private fun findClosestColor(r: Int, g: Int, b: Int): ResistorColor {
-        var closestColor = ResistorColor.BODY
-        var minDistance = Double.MAX_VALUE
+        val hsv = FloatArray(3)
+        android.graphics.Color.RGBToHSV(r, g, b, hsv)
 
-        // Loop through all colors in your Enum (except the BODY placeholder)
-        for (color in ResistorColor.entries) {
-            if (color == ResistorColor.BODY) continue
+        val hue = hsv[0]   // 0.0 to 360.0
+        val sat = hsv[1]   // 0.0 to 1.0
+        val value = hsv[2] // 0.0 to 1.0
 
-            // Simple Euclidean distance math to find which standard color
-            // the pixel is "closest" to in 3D RGB space.
-            val dR = r - getStandardRGB(color)[0]
-            val dG = g - getStandardRGB(color)[1]
-            val dB = b - getStandardRGB(color)[2]
-            val distance = Math.sqrt((dR * dR + dG * dG + dB * dB).toDouble())
+        if (value < 0.25f) return ResistorColor.BLACK
+        if (value > 0.8f && sat < 0.15f) return ResistorColor.WHITE
 
-            if (distance < minDistance) {
-                minDistance = distance
-                closestColor = color
-            }
+        // NEW: If it's dark but lacks color, it's a glossy Black band, not Grey.
+        if (sat < 0.2f && value in 0.25f..0.5f) return ResistorColor.BLACK
+
+        // NEW: Stricter separation between Brown and Orange
+        // Brown must be noticeably dark. If it's bright, it's Orange.
+        if (hue in 10f..35f && value < 0.45f) return ResistorColor.BROWN
+        if (hue in 35f..55f && sat > 0.4f && value > 0.4f && value < 0.85f) return ResistorColor.GOLD
+
+        return when (hue) {
+            in 0f..10f, in 345f..360f -> ResistorColor.RED
+            in 11f..38f -> ResistorColor.ORANGE
+            in 39f..65f -> ResistorColor.YELLOW
+            in 66f..160f -> ResistorColor.GREEN
+            in 161f..260f -> ResistorColor.BLUE
+            in 261f..344f -> ResistorColor.VIOLET
+            else -> ResistorColor.BODY
         }
-        return closestColor
     }
 
-    // Helper to define what "True" Red, Brown, etc., look like in RGB
     private fun getStandardRGB(color: ResistorColor): IntArray {
         return when (color) {
             ResistorColor.BLACK -> intArrayOf(0, 0, 0)
@@ -264,9 +258,10 @@ class MainActivity : AppCompatActivity() {
             ResistorColor.WHITE -> intArrayOf(255, 255, 255)
             ResistorColor.GOLD -> intArrayOf(212, 175, 55)
             ResistorColor.SILVER -> intArrayOf(192, 192, 192)
-            else -> intArrayOf(200, 200, 200) // Default body color
+            else -> intArrayOf(200, 200, 200)
         }
     }
+
     private fun calculateResistance(colors: List<ResistorColor>): String {
         if (colors.size < 3) return "Scan Failed"
 
@@ -282,34 +277,107 @@ class MainActivity : AppCompatActivity() {
             else -> "$resistance Ω"
         }
     }
-    private fun scanImageForColors(bitmap: Bitmap): List<ResistorColor> {
+
+    private fun scanImageForColors(bitmap: Bitmap): Pair<List<ResistorColor>, Bitmap> {
         val detectedColors = mutableListOf<ResistorColor>()
-        val midY = bitmap.height / 2
-        var lastColor: ResistorColor? = null
 
-        // We scan every 5th pixel to save processing power and avoid "noise"
-        for (x in 0 until bitmap.width step 5) {
-            val pixel = bitmap.getPixel(x, midY)
+        // --- STEP 1: STRICTER WHITE PAPER MASK ---
+        val maskedBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
 
-            val r = android.graphics.Color.red(pixel)
-            val g = android.graphics.Color.green(pixel)
-            val b = android.graphics.Color.blue(pixel)
+        for (x in 0 until bitmap.width) {
+            for (y in 0 until bitmap.height) {
+                val pixel = bitmap.getPixel(x, y)
+                val hsv = FloatArray(3)
+                android.graphics.Color.colorToHSV(pixel, hsv)
+                val sat = hsv[1]
+                val value = hsv[2]
 
-            val currentColor = findClosestColor(r, g, b)
-
-            // HCI Logic: We only care about CHANGE.
-            // If we see "Brown, Brown, Brown", we only record one "Brown".
-            // We also ignore the "BODY" color of the resistor.
-            if (currentColor != ResistorColor.BODY && currentColor != lastColor) {
-                detectedColors.add(currentColor)
-                lastColor = currentColor
+                // TIGHTENED: Must be extremely bright (>0.80) and almost zero color (<0.15)
+                // This will stop the beige resistor body from turning magenta.
+                if (sat < 0.15f && value > 0.80f) {
+                    maskedBitmap.setPixel(x, y, android.graphics.Color.MAGENTA)
+                } else {
+                    maskedBitmap.setPixel(x, y, pixel)
+                }
             }
         }
 
-        // Most resistors have 3 or 4 bands. If we find more than 4,
-        // the image might be too noisy, so we just take the first 4.
-        return detectedColors.take(4)
+        // --- STEP 2: ANALYZE THE MASKED IMAGE (With Black Override) ---
+        var lastSeenColor: ResistorColor? = null
+        var consecutiveCount = 0
+        val MINIMUM_WIDTH = 4
+
+        val scanStartY = (bitmap.height * 0.15).toInt()
+        val scanEndY = (bitmap.height * 0.85).toInt()
+
+        for (x in 0 until bitmap.width step 3) {
+            var highestSaturation = -1f
+            var lowestValue = 1.0f // Track how dark the darkest pixel is
+            var winningColorInColumn = ResistorColor.BODY
+            var validPixelsInColumn = 0
+
+            for (y in scanStartY..scanEndY step 3) {
+                val pixel = maskedBitmap.getPixel(x, y)
+
+                if (pixel == android.graphics.Color.MAGENTA) continue
+                validPixelsInColumn++
+
+                val r = android.graphics.Color.red(pixel)
+                val g = android.graphics.Color.green(pixel)
+                val b = android.graphics.Color.blue(pixel)
+
+                val hsv = FloatArray(3)
+                android.graphics.Color.colorToHSV(pixel, hsv)
+                val sat = hsv[1]
+                val value = hsv[2]
+
+                // Track the darkest spot in this column
+                if (value < lowestValue) {
+                    lowestValue = value
+                }
+
+                // Skip pure glare
+                if (sat < 0.2f && value > 0.7f) continue
+
+                // Find the most vividly colored pixel
+                if (sat > highestSaturation) {
+                    highestSaturation = sat
+                    winningColorInColumn = findClosestColor(r, g, b)
+                }
+            }
+
+            // If it's mostly background noise, skip
+            if (validPixelsInColumn < 3) {
+                consecutiveCount = 0
+                continue
+            }
+
+            // THE BLACK OVERRIDE:
+            // If the column has a genuinely dark shadow/band, it's the Black band!
+            // This bypasses the saturation check completely.
+            if (lowestValue < 0.35f) {
+                winningColorInColumn = ResistorColor.BLACK
+            }
+
+            if (winningColorInColumn == ResistorColor.BODY) {
+                consecutiveCount = 0
+                continue
+            }
+
+            // Minimum Width Filter
+            if (winningColorInColumn == lastSeenColor) {
+                consecutiveCount++
+                if (consecutiveCount == MINIMUM_WIDTH) {
+                    if (detectedColors.lastOrNull() != winningColorInColumn) {
+                        detectedColors.add(winningColorInColumn)
+                    }
+                }
+            } else {
+                lastSeenColor = winningColorInColumn
+                consecutiveCount = 1
+            }
+        }
+
+        return Pair(detectedColors.take(4), maskedBitmap)
     }
 }
-
-
