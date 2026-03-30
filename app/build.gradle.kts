@@ -56,4 +56,5 @@ dependencies {
     implementation(libs.androidx.camera.view)
     implementation(libs.androidx.camera.video)
     implementation("androidx.core:core-splashscreen:1.2.0")
+    implementation("androidx.camera:camera-core:1.3.0")
 }
