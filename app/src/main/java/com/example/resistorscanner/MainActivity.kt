@@ -152,8 +152,8 @@ class MainActivity : AppCompatActivity() {
                     val croppedBitmap = cropToReticle(fullBitmap)
                     image.close()
 
-                    // THE REAL SCAN HAPPENS HERE
-                    val detectedColors = scanImageForColors(croppedBitmap)
+                    // 1. Get the initial scan results and convert to a MutableList so we can edit them
+                    val detectedColors = scanImageForColors(croppedBitmap).toMutableList()
                     val resultText = calculateResistance(detectedColors)
 
                     runOnUiThread {
@@ -169,22 +169,22 @@ class MainActivity : AppCompatActivity() {
                         binding.colorPreviewContainer.visibility = android.view.View.VISIBLE
 
                         val bands = listOf(binding.band1, binding.band2, binding.band3, binding.band4)
-// Hide all initially
+
+                        // Reset: Hide all squares before drawing the new ones
                         bands.forEach { it.visibility = android.view.View.GONE }
 
+                        // 2. Loop through the detected colors and set up the "Tap to Edit" logic
                         detectedColors.forEachIndexed { index, color ->
                             if (index < bands.size) {
                                 bands[index].visibility = android.view.View.VISIBLE
-                                // Convert your Enum color to an actual Android Color Int
-                                bands[index].setBackgroundColor(android.graphics.Color.rgb(
-                                    getStandardRGB(color)[0],
-                                    getStandardRGB(color)[1],
-                                    getStandardRGB(color)[2]
-                                ))
 
-                                // Add the "Touch to see value" Toast
+                                // Set the square's color
+                                val rgb = getStandardRGB(color)
+                                bands[index].setBackgroundColor(android.graphics.Color.rgb(rgb[0], rgb[1], rgb[2]))
+
+                                // NEW: Instead of just a Toast, open the Color Picker when tapped
                                 bands[index].setOnClickListener {
-                                    Toast.makeText(this@MainActivity, "${color.name}: ${color.value}", Toast.LENGTH_SHORT).show()
+                                    showColorPicker(index, detectedColors)
                                 }
                             }
                         }
@@ -309,6 +309,33 @@ class MainActivity : AppCompatActivity() {
         // Most resistors have 3 or 4 bands. If we find more than 4,
         // the image might be too noisy, so we just take the first 4.
         return detectedColors.take(4)
+    }
+    private fun showColorPicker(index: Int, currentDetectedColors: MutableList<ResistorColor>) {
+        // Create a list of names from our Enum (excluding BODY)
+        val colorNames = ResistorColor.entries
+            .filter { it != ResistorColor.BODY }
+            .map { it.name }
+            .toTypedArray()
+
+        val builder = android.app.AlertDialog.Builder(this)
+        builder.setTitle("Select Correct Color")
+        builder.setItems(colorNames) { _, which ->
+            // 1. Update the color in our list
+            val selectedColor = ResistorColor.valueOf(colorNames[which])
+            currentDetectedColors[index] = selectedColor
+
+            // 2. Update the Square's UI color
+            val bands = listOf(binding.band1, binding.band2, binding.band3, binding.band4)
+            val rgb = getStandardRGB(selectedColor)
+            bands[index].setBackgroundColor(android.graphics.Color.rgb(rgb[0], rgb[1], rgb[2]))
+
+            // 3. Recalculate the Ohms and update the text
+            val newResult = calculateResistance(currentDetectedColors)
+            binding.resultText.text = newResult
+
+            Toast.makeText(this, "Updated to ${selectedColor.name}", Toast.LENGTH_SHORT).show()
+        }
+        builder.show()
     }
 }
 
