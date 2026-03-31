@@ -18,49 +18,34 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import com.example.resistorscanner.databinding.ActivityMainBinding
 import android.util.Log
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Matrix
+import android.graphics.*
+import android.view.MotionEvent
+import android.view.View
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 
-enum class ResistorColor(val value: Int, val multiplier: Double, val tolerance: Double?) {
+enum class ResistorColor(val value: Int, val multiplier: Double, val tolerance: String?) {
     BLACK(0, 1.0, null),
-    BROWN(1, 10.0, 1.0),
-    RED(2, 100.0, 2.0),
+    BROWN(1, 10.0, "±1%"),
+    RED(2, 100.0, "±2%"),
     ORANGE(3, 1000.0, null),
     YELLOW(4, 10000.0, null),
-    GREEN(5, 100000.0, 0.5),
-    BLUE(6, 1000000.0, 0.25),
-    VIOLET(7, 10000000.0, 0.1),
-    GREY(8, 100000000.0, 0.05),
+    GREEN(5, 100000.0, "±0.5%"),
+    BLUE(6, 1000000.0, "±0.25%"),
+    VIOLET(7, 10000000.0, "±0.1%"),
+    GREY(8, 100000000.0, "±0.05%"),
     WHITE(9, 1000000000.0, null),
-    GOLD(-1, 0.1, 5.0),
-    SILVER(-1, 0.01, 10.0),
+    GOLD(-1, 0.1, "±5%"),
+    SILVER(-1, 0.01, "±10%"),
     BODY(-2, 0.0, null)
 }
 
-fun ImageProxy.toCorrectBitmap(): Bitmap {
-    val rotationDegrees = this.imageInfo.rotationDegrees
-    val buffer = planes[0].buffer
-    val bytes = ByteArray(buffer.remaining())
-    buffer.get(bytes)
-    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-
-    return if (rotationDegrees != 0) {
-        val matrix = Matrix()
-        matrix.postRotate(rotationDegrees.toFloat())
-        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
-        bmp.recycle()
-        rotated
-    } else {
-        bmp
-    }
-}
-
 class MainActivity : AppCompatActivity() {
-    private val REQUIRED_PERMISSIONS = arrayOf(android.Manifest.permission.CAMERA)
     private lateinit var binding: ActivityMainBinding
     private var imageCapture: ImageCapture? = null
+
+    private var currentPickingIndex = 0
+    private val pickedColors = mutableListOf(ResistorColor.BODY, ResistorColor.BODY, ResistorColor.BODY, ResistorColor.BODY)
+    private var baseBitmap: Bitmap? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
@@ -78,177 +63,211 @@ class MainActivity : AppCompatActivity() {
         if (allPermissionsGranted()) {
             binding.viewFinder.post { startCamera() }
         } else {
-            ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, 10)
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 10)
         }
 
-        binding.captureButton.setOnClickListener {
-            takePhoto()
-        }
-        binding.retryButton.setOnClickListener {
-            resetCamera()
-        }
-    }
+        binding.captureButton.setOnClickListener { takePhoto() }
+        binding.retryButton.setOnClickListener { resetCamera() }
+        binding.undoButton?.setOnClickListener { undoLastPick() }
 
-    private fun startCamera() {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-
-        cameraProviderFuture.addListener({
-            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
-
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(binding.viewFinder.surfaceProvider)
-            }
-
-            imageCapture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                .build()
-
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageCapture)
-            } catch (exc: Exception) {
-                Log.e("ScannerApp", "Use case binding failed", exc)
-            }
-        }, ContextCompat.getMainExecutor(this))
-    }
-
-    private fun allPermissionsGranted() = arrayOf(Manifest.permission.CAMERA).all {
-        ContextCompat.checkSelfPermission(baseContext, it) == PackageManager.PERMISSION_GRANTED
-    }
-
-    override fun onRequestPermissionsResult(rc: Int, perms: Array<out String>, results: IntArray) {
-        super.onRequestPermissionsResult(rc, perms, results)
-        if (rc == 10 && allPermissionsGranted()) {
-            startCamera()
+        binding.chartButton.setOnClickListener {
+            val intent = android.content.Intent(this, ChartActivity::class.java)
+            intent.putExtra("BAND1", pickedColors[0].name)
+            intent.putExtra("BAND2", pickedColors[1].name)
+            intent.putExtra("BAND3", pickedColors[2].name)
+            intent.putExtra("BAND4", pickedColors[3].name)
+            startActivity(intent)
         }
     }
 
     private fun takePhoto() {
         val imageCapture = imageCapture ?: return
-
         imageCapture.takePicture(
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
                     val fullBitmap = image.toCorrectBitmap()
-                    val croppedBitmap = cropToReticle(fullBitmap)
+                    baseBitmap = cropToReticle(fullBitmap)
                     image.close()
 
-                    // THE REAL SCAN
-                    val (detectedColors, maskedBitmap) = scanImageForColors(croppedBitmap)
-                    val mutableColors = detectedColors.toMutableList()
-                    val resultText = calculateResistance(mutableColors)
-
-                    runOnUiThread {
-                        binding.viewFinder.visibility = android.view.View.GONE
-                        binding.resultImageView.visibility = android.view.View.VISIBLE
-
-                        // Show the Debug Mask
-                        binding.resultImageView.setImageBitmap(maskedBitmap)
-
-                        binding.resultText.text = resultText
-                        binding.resultText.visibility = android.view.View.VISIBLE
-
-                        binding.captureButton.visibility = android.view.View.GONE
-                        binding.retryButton.visibility = android.view.View.VISIBLE
-                        binding.colorPreviewContainer.visibility = android.view.View.VISIBLE
-
-                        updateColorBandsUI(mutableColors)
-                    }
+                    runOnUiThread { showSelectionUI() }
                 }
-                override fun onError(exception: ImageCaptureException) {
-                    Log.e("ScannerApp", "Photo capture failed: ${exception.message}", exception)
-                }
+                override fun onError(exc: ImageCaptureException) { Log.e("ScannerApp", "Error", exc) }
             }
         )
     }
 
-    private fun updateColorBandsUI(colors: MutableList<ResistorColor>) {
-        val bands = listOf(binding.band1, binding.band2, binding.band3, binding.band4)
+    private fun showSelectionUI() {
+        binding.viewFinder.visibility = View.GONE
+        binding.resultImageView.visibility = View.VISIBLE
+        binding.resultImageView.setImageBitmap(baseBitmap)
+        binding.captureButton.visibility = View.GONE
+        binding.retryButton.visibility = View.VISIBLE
+        binding.colorPreviewContainer.visibility = View.VISIBLE
+        binding.undoButton?.visibility = View.VISIBLE
 
-        // Hide all initially
-        bands.forEach { it.visibility = android.view.View.GONE }
+        currentPickingIndex = 0
+        pickedColors.fill(ResistorColor.BODY)
+        updateColorBandsUI()
 
-        colors.forEachIndexed { index, color ->
-            if (index < bands.size) {
-                bands[index].visibility = android.view.View.VISIBLE
+        Toast.makeText(this, "Tap Band 1", Toast.LENGTH_SHORT).show()
 
-                // Set visual color
-                val rgb = getStandardRGB(color)
-                bands[index].setBackgroundColor(android.graphics.Color.rgb(rgb[0], rgb[1], rgb[2]))
-
-                // Manual override on tap
-                bands[index].setOnClickListener {
-                    showColorPicker(index, colors)
-                }
-            }
+        binding.resultImageView.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN && currentPickingIndex < 4) {
+                handleImageTap(event.x, event.y)
+                true
+            } else false
         }
     }
 
-    private fun showColorPicker(index: Int, currentColors: MutableList<ResistorColor>) {
-        val options = ResistorColor.entries.filter { it != ResistorColor.BODY }
-        val names = options.map { it.name }.toTypedArray()
+    private fun handleImageTap(touchX: Float, touchY: Float) {
+        val bitmap = baseBitmap ?: return
 
-        android.app.AlertDialog.Builder(this)
-            .setTitle("Correct this band")
-            .setItems(names) { _, which ->
-                val selected = options[which]
-                currentColors[index] = selected
+        val viewWidth = binding.resultImageView.width
+        val viewHeight = binding.resultImageView.height
+        val bitmapX = (touchX * bitmap.width / viewWidth).toInt().coerceIn(0, bitmap.width - 1)
+        val bitmapY = (touchY * bitmap.height / viewHeight).toInt().coerceIn(0, bitmap.height - 1)
 
-                // Refresh UI
-                updateColorBandsUI(currentColors)
-                binding.resultText.text = calculateResistance(currentColors)
+        val pixel = bitmap.getPixel(bitmapX, bitmapY)
+        val color = findClosestColor(Color.red(pixel), Color.green(pixel), Color.blue(pixel))
 
-                Toast.makeText(this, "Updated to ${selected.name}", Toast.LENGTH_SHORT).show()
+        pickedColors[currentPickingIndex] = color
+        drawMarkerOnImage(bitmapX, bitmapY)
+        updateColorBandsUI()
+
+        binding.resultText.text = calculateResistance(pickedColors)
+        binding.resultText.visibility = View.VISIBLE
+
+        currentPickingIndex++
+        if (currentPickingIndex < 4) {
+            Toast.makeText(this, "Tap Band ${currentPickingIndex + 1}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun drawMarkerOnImage(x: Int, y: Int) {
+        val currentBitmap = (binding.resultImageView.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap ?: return
+        val mutableBitmap = currentBitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(mutableBitmap)
+        val paint = Paint().apply {
+            color = Color.CYAN
+            style = Paint.Style.STROKE
+            strokeWidth = 5f
+            isAntiAlias = true
+        }
+        canvas.drawCircle(x.toFloat(), y.toFloat(), 15f, paint)
+        binding.resultImageView.setImageBitmap(mutableBitmap)
+    }
+
+    private fun undoLastPick() {
+        if (currentPickingIndex > 0) {
+            currentPickingIndex--
+            pickedColors[currentPickingIndex] = ResistorColor.BODY
+            binding.resultImageView.setImageBitmap(baseBitmap)
+            updateColorBandsUI()
+            binding.resultText.text = calculateResistance(pickedColors)
+            Toast.makeText(this, "Redo Band ${currentPickingIndex + 1}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun updateColorBandsUI() {
+        val bands = listOf(binding.band1, binding.band2, binding.band3, binding.band4)
+        pickedColors.forEachIndexed { index, color ->
+            bands[index].visibility = if (color == ResistorColor.BODY) View.INVISIBLE else View.VISIBLE
+
+            // Fix 2: Using the standard RGB values for the UI preview bands
+            val rgb = getStandardRGB(color)
+            bands[index].setBackgroundColor(Color.rgb(rgb[0], rgb[1], rgb[2]))
+
+            bands[index].setOnClickListener { showColorPicker(index) }
+        }
+    }
+
+    private fun calculateResistance(colors: List<ResistorColor>): String {
+        val active = colors.filter { it != ResistorColor.BODY }
+        if (active.size < 3) return "Select 3+ bands"
+
+        val d1 = active[0].value
+        val d2 = active[1].value
+        val mult = active[2].multiplier
+        val res = (d1 * 10 + d2) * mult
+
+        val resStr = when {
+            res >= 1_000_000 -> "${res / 1_000_000} MΩ"
+            res >= 1_000 -> "${res / 1_000} kΩ"
+            else -> "$res Ω"
+        }
+
+        val tolerance = if (active.size == 4) " ${active[3].tolerance ?: ""}" else ""
+        return "$resStr$tolerance"
+    }
+
+    private fun startCamera() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+        cameraProviderFuture.addListener({
+            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
+            val preview = Preview.Builder().build().also {
+                it.setSurfaceProvider(binding.viewFinder.surfaceProvider)
             }
-            .show()
+            imageCapture = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .build()
+            try {
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
+            } catch (exc: Exception) { Log.e("ScannerApp", "Failed", exc) }
+        }, ContextCompat.getMainExecutor(this))
     }
 
     private fun resetCamera() {
-        binding.viewFinder.visibility = android.view.View.VISIBLE
-        binding.resultImageView.visibility = android.view.View.GONE
-        binding.resultText.visibility = android.view.View.GONE
-        binding.colorPreviewContainer.visibility = android.view.View.GONE
-        binding.captureButton.visibility = android.view.View.VISIBLE
-        binding.retryButton.visibility = android.view.View.GONE
+        binding.viewFinder.visibility = View.VISIBLE
+        binding.resultImageView.visibility = View.GONE
+        binding.resultText.visibility = View.GONE
+        binding.colorPreviewContainer.visibility = View.GONE
+        binding.captureButton.visibility = View.VISIBLE
+        binding.retryButton.visibility = View.GONE
+        binding.undoButton.visibility = View.GONE
+        binding.resultImageView.setOnTouchListener(null)
+        currentPickingIndex = 0
     }
 
     private fun cropToReticle(fullBitmap: Bitmap): Bitmap {
-        val width = fullBitmap.width
-        val height = fullBitmap.height
+        val cropWidth = (fullBitmap.width * 0.98f).toInt()
+        val cropHeight = (fullBitmap.height * 0.20f).toInt()
+        return Bitmap.createBitmap(fullBitmap, (fullBitmap.width - cropWidth) / 2, (fullBitmap.height - cropHeight) / 2, cropWidth, cropHeight)
+    }
 
-        val boxWidthPercentage = 0.98f
-        val boxHeightPercentage = 0.20f
+    private fun allPermissionsGranted() = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
-        val cropWidth = (width * boxWidthPercentage).toInt()
-        val cropHeight = (height * boxHeightPercentage).toInt()
-
-        val cropStartX = (width - cropWidth) / 2
-        val cropStartY = (height - cropHeight) / 2
-
-        return Bitmap.createBitmap(fullBitmap, cropStartX, cropStartY, cropWidth, cropHeight)
+    private fun showColorPicker(index: Int) {
+        val options = ResistorColor.entries.filter { it != ResistorColor.BODY }
+        val names = options.map { it.name }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Correct Band ${index + 1}")
+            .setItems(names) { _, which ->
+                pickedColors[index] = options[which]
+                updateColorBandsUI()
+                binding.resultText.text = calculateResistance(pickedColors)
+            }.show()
     }
 
     private fun findClosestColor(r: Int, g: Int, b: Int): ResistorColor {
         val hsv = FloatArray(3)
-        android.graphics.Color.RGBToHSV(r, g, b, hsv)
+        Color.RGBToHSV(r, g, b, hsv)
+        val hue = hsv[0]; val sat = hsv[1]; val value = hsv[2]
 
-        val hue = hsv[0]
-        val sat = hsv[1]
-        val value = hsv[2]
-
+        // Fix 1: Refined detection for Black, White, Grey, and Silver
         if (value < 0.25f) return ResistorColor.BLACK
-        if (value > 0.8f && sat < 0.15f) return ResistorColor.WHITE
-        if (sat < 0.2f && value in 0.25f..0.5f) return ResistorColor.BLACK
+        if (sat < 0.15f) {
+            return if (value > 0.85f) ResistorColor.WHITE else ResistorColor.GREY
+        }
+        if (sat < 0.25f && value > 0.5f && value < 0.85f) return ResistorColor.SILVER
 
         if (hue in 10f..35f && value < 0.45f) return ResistorColor.BROWN
         if (hue in 35f..55f && sat > 0.4f && value > 0.4f && value < 0.85f) return ResistorColor.GOLD
 
         return when (hue) {
-            in 0f..10f, in 345f..360f -> ResistorColor.RED
-            in 11f..38f -> ResistorColor.ORANGE
+            in 0f..12f, in 345f..360f -> ResistorColor.RED
+            in 13f..38f -> ResistorColor.ORANGE
             in 39f..65f -> ResistorColor.YELLOW
             in 66f..160f -> ResistorColor.GREEN
             in 161f..260f -> ResistorColor.BLUE
@@ -271,99 +290,19 @@ class MainActivity : AppCompatActivity() {
             ResistorColor.WHITE -> intArrayOf(255, 255, 255)
             ResistorColor.GOLD -> intArrayOf(212, 175, 55)
             ResistorColor.SILVER -> intArrayOf(192, 192, 192)
-            else -> intArrayOf(200, 200, 200)
+            else -> intArrayOf(60, 60, 60) // Neutral dark grey for BODY
         }
     }
+}
 
-    private fun calculateResistance(colors: List<ResistorColor>): String {
-        if (colors.size < 3) return "Scan Failed"
-
-        val digit1 = colors[0].value
-        val digit2 = colors[1].value
-        val multiplier = colors[2].multiplier
-
-        val resistance = (digit1 * 10 + digit2) * multiplier
-
-        return when {
-            resistance >= 1_000_000 -> "${resistance / 1_000_000} MΩ"
-            resistance >= 1_000 -> "${resistance / 1_000} kΩ"
-            else -> "$resistance Ω"
-        }
-    }
-
-    private fun scanImageForColors(bitmap: Bitmap): Pair<List<ResistorColor>, Bitmap> {
-        val detectedColors = mutableListOf<ResistorColor>()
-        val maskedBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
-
-        for (x in 0 until bitmap.width) {
-            for (y in 0 until bitmap.height) {
-                val pixel = bitmap.getPixel(x, y)
-                val hsv = FloatArray(3)
-                android.graphics.Color.colorToHSV(pixel, hsv)
-                if (hsv[1] < 0.15f && hsv[2] > 0.80f) {
-                    maskedBitmap.setPixel(x, y, android.graphics.Color.MAGENTA)
-                } else {
-                    maskedBitmap.setPixel(x, y, pixel)
-                }
-            }
-        }
-
-        var lastSeenColor: ResistorColor? = null
-        var consecutiveCount = 0
-        val MINIMUM_WIDTH = 4
-        val scanStartY = (bitmap.height * 0.15).toInt()
-        val scanEndY = (bitmap.height * 0.85).toInt()
-
-        for (x in 0 until bitmap.width step 3) {
-            var highestSaturation = -1f
-            var lowestValue = 1.0f
-            var winningColorInColumn = ResistorColor.BODY
-            var validPixelsInColumn = 0
-
-            for (y in scanStartY..scanEndY step 3) {
-                val pixel = maskedBitmap.getPixel(x, y)
-                if (pixel == android.graphics.Color.MAGENTA) continue
-                validPixelsInColumn++
-
-                val hsv = FloatArray(3)
-                android.graphics.Color.colorToHSV(pixel, hsv)
-                if (hsv[2] < lowestValue) lowestValue = hsv[2]
-                if (hsv[1] < 0.2f && hsv[2] > 0.7f) continue
-
-                if (hsv[1] > highestSaturation) {
-                    highestSaturation = hsv[1]
-                    winningColorInColumn = findClosestColor(
-                        android.graphics.Color.red(pixel),
-                        android.graphics.Color.green(pixel),
-                        android.graphics.Color.blue(pixel)
-                    )
-                }
-            }
-
-            if (validPixelsInColumn < 3) {
-                consecutiveCount = 0
-                continue
-            }
-
-            if (lowestValue < 0.35f) winningColorInColumn = ResistorColor.BLACK
-            if (winningColorInColumn == ResistorColor.BODY) {
-                consecutiveCount = 0
-                continue
-            }
-
-            if (winningColorInColumn == lastSeenColor) {
-                consecutiveCount++
-                if (consecutiveCount == MINIMUM_WIDTH) {
-                    if (detectedColors.lastOrNull() != winningColorInColumn) {
-                        detectedColors.add(winningColorInColumn)
-                    }
-                }
-            } else {
-                lastSeenColor = winningColorInColumn
-                consecutiveCount = 1
-            }
-        }
-
-        return Pair(detectedColors.take(4), maskedBitmap)
-    }
+fun ImageProxy.toCorrectBitmap(): Bitmap {
+    val buffer = planes[0].buffer
+    val bytes = ByteArray(buffer.remaining())
+    buffer.get(bytes)
+    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    val rotation = imageInfo.rotationDegrees
+    return if (rotation != 0) {
+        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+        Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+    } else bmp
 }

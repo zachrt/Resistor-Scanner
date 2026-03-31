@@ -21,6 +21,17 @@
         android:visibility="gone"
         android:scaleType="fitCenter" />
 
+    <Button
+        android:id="@+id/chartButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="48dp"
+        android:layout_marginEnd="16dp"
+        android:text="Chart"
+        android:backgroundTint="#4CAF50"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
     <LinearLayout
         android:id="@+id/controlsContainer"
         android:layout_width="match_parent"
@@ -28,18 +39,8 @@
         android:gravity="center"
         android:orientation="vertical"
         android:padding="24dp"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent">
+        app:layout_constraintBottom_toBottomOf="parent">
 
-        <com.google.android.material.switchmaterial.SwitchMaterial
-            android:id="@+id/autoCaptureSwitch"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            android:text="Auto Capture"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp" />
         <LinearLayout
             android:id="@+id/colorPreviewContainer"
             android:layout_width="wrap_content"
@@ -53,6 +54,7 @@
             <View android:id="@+id/band3" android:layout_width="30dp" android:layout_height="30dp" android:layout_margin="4dp" android:background="#000000"/>
             <View android:id="@+id/band4" android:layout_width="30dp" android:layout_height="30dp" android:layout_margin="4dp" android:background="#000000"/>
         </LinearLayout>
+
         <TextView
             android:id="@+id/resultText"
             android:layout_width="wrap_content"
@@ -63,6 +65,7 @@
             android:textSize="32sp"
             android:textStyle="bold"
             android:visibility="gone" />
+
         <Button
             android:id="@+id/captureButton"
             android:layout_width="200dp"
@@ -70,18 +73,36 @@
             android:backgroundTint="#E91E63"
             android:text="Capture"
             android:textColor="#FFFFFF"
-            android:textSize="18sp"
             app:cornerRadius="32dp" />
-        <Button
-            android:id="@+id/retryButton"
-            android:layout_width="200dp"
-            android:layout_height="64dp"
-            android:layout_marginTop="16dp"
-            android:backgroundTint="#607D8B"
-            android:text="Try Again"
-            android:textColor="#FFFFFF"
-            android:visibility="gone"
-            app:cornerRadius="32dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center">
+
+            <Button
+                android:id="@+id/retryButton"
+                android:layout_width="0dp"
+                android:layout_height="64dp"
+                android:layout_weight="1"
+                android:layout_marginEnd="8dp"
+                android:backgroundTint="#607D8B"
+                android:text="New Scan"
+                android:visibility="gone"
+                app:cornerRadius="12dp" />
+
+            <Button
+                android:id="@+id/undoButton"
+                android:layout_width="0dp"
+                android:layout_height="64dp"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:backgroundTint="#FF9800"
+                android:text="Undo Tap"
+                android:visibility="gone"
+                app:cornerRadius="12dp" />
+        </LinearLayout>
     </LinearLayout>
 
     <View
@@ -99,10 +120,8 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginBottom="12dp"
-        android:text="Align resistor within the box"
+        android:text="Align resistor horizontally"
         android:textColor="#FFEB3B"
-        android:textStyle="bold"
-        android:textSize="16sp"
         app:layout_constraintBottom_toTopOf="@+id/reticle"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
