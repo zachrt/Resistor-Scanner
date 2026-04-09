@@ -21,8 +21,11 @@ import android.util.Log
 import android.graphics.*
 import android.view.MotionEvent
 import android.view.View
+import android.widget.ImageView
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import com.google.android.material.snackbar.Snackbar
 
+// --- DATA MODEL ---
 enum class ResistorColor(val value: Int, val multiplier: Double, val tolerance: String?) {
     BLACK(0, 1.0, null),
     BROWN(1, 10.0, "±1%"),
@@ -43,9 +46,20 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private var imageCapture: ImageCapture? = null
 
+    // State Management
+    private var originalBitmap: Bitmap? = null
+    private var baseBitmap: Bitmap? = null
     private var currentPickingIndex = 0
     private val pickedColors = mutableListOf(ResistorColor.BODY, ResistorColor.BODY, ResistorColor.BODY, ResistorColor.BODY)
-    private var baseBitmap: Bitmap? = null
+    private val markerPoints = mutableListOf<PointF>()
+
+    // Zooming State
+    private var matrix = Matrix()
+    private var savedMatrix = Matrix()
+    private var mode = 0
+    private val startPoint = PointF()
+    private val midPoint = PointF()
+    private var oldDist = 1f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
@@ -53,6 +67,8 @@ class MainActivity : AppCompatActivity() {
         enableEdgeToEdge()
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        supportActionBar?.title = "Resistor Scanner"
 
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -87,9 +103,14 @@ class MainActivity : AppCompatActivity() {
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
                     val fullBitmap = image.toCorrectBitmap()
-                    baseBitmap = cropToReticle(fullBitmap)
-                    image.close()
+                    val cropped = cropToReticle(fullBitmap)
 
+                    // FIXED: Fallback config for safety
+                    val config = cropped.config ?: Bitmap.Config.ARGB_8888
+                    originalBitmap = cropped.copy(config, true)
+                    baseBitmap = cropped
+
+                    image.close()
                     runOnUiThread { showSelectionUI() }
                 }
                 override fun onError(exc: ImageCaptureException) { Log.e("ScannerApp", "Error", exc) }
@@ -98,9 +119,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSelectionUI() {
+        supportActionBar?.title = "Identify Bands"
+        supportActionBar?.subtitle = "Pinch to zoom, tap to select"
+
         binding.viewFinder.visibility = View.GONE
         binding.resultImageView.visibility = View.VISIBLE
         binding.resultImageView.setImageBitmap(baseBitmap)
+        binding.resultImageView.scaleType = ImageView.ScaleType.MATRIX
+
         binding.captureButton.visibility = View.GONE
         binding.retryButton.visibility = View.VISIBLE
         binding.colorPreviewContainer.visibility = View.VISIBLE
@@ -108,114 +134,116 @@ class MainActivity : AppCompatActivity() {
 
         currentPickingIndex = 0
         pickedColors.fill(ResistorColor.BODY)
+        markerPoints.clear()
         updateColorBandsUI()
+        setupZoomableImageView()
+    }
 
-        Toast.makeText(this, "Tap Band 1", Toast.LENGTH_SHORT).show()
-
-        binding.resultImageView.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_DOWN && currentPickingIndex < 4) {
-                handleImageTap(event.x, event.y)
-                true
-            } else false
+    private fun setupZoomableImageView() {
+        binding.resultImageView.setOnTouchListener { v, event ->
+            val view = v as ImageView
+            when (event.action and MotionEvent.ACTION_MASK) {
+                MotionEvent.ACTION_DOWN -> {
+                    savedMatrix.set(matrix)
+                    startPoint.set(event.x, event.y)
+                    mode = 1
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    oldDist = spacing(event)
+                    if (oldDist > 10f) {
+                        savedMatrix.set(matrix)
+                        midPoint(midPoint, event)
+                        mode = 2
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                    if (mode == 1 && distance(event.x, event.y, startPoint.x, startPoint.y) < 10) {
+                        if (currentPickingIndex < 4) handleZoomedTap(event.x, event.y)
+                    }
+                    mode = 0
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (mode == 1) {
+                        matrix.set(savedMatrix)
+                        matrix.postTranslate(event.x - startPoint.x, event.y - startPoint.y)
+                    } else if (mode == 2) {
+                        val newDist = spacing(event)
+                        if (newDist > 10f) {
+                            matrix.set(savedMatrix)
+                            val scale = newDist / oldDist
+                            matrix.postScale(scale, scale, midPoint.x, midPoint.y)
+                        }
+                    }
+                }
+            }
+            view.imageMatrix = matrix
+            true
         }
     }
 
-    private fun handleImageTap(touchX: Float, touchY: Float) {
-        val bitmap = baseBitmap ?: return
+    private fun handleZoomedTap(touchX: Float, touchY: Float) {
+        val bitmap = originalBitmap ?: return
+        val inverse = Matrix()
+        binding.resultImageView.imageMatrix.invert(inverse)
+        val touchPoint = floatArrayOf(touchX, touchY)
+        inverse.mapPoints(touchPoint)
 
-        val viewWidth = binding.resultImageView.width
-        val viewHeight = binding.resultImageView.height
-        val bitmapX = (touchX * bitmap.width / viewWidth).toInt().coerceIn(0, bitmap.width - 1)
-        val bitmapY = (touchY * bitmap.height / viewHeight).toInt().coerceIn(0, bitmap.height - 1)
+        val bitmapX = touchPoint[0].toInt().coerceIn(0, bitmap.width - 1)
+        val bitmapY = touchPoint[1].toInt().coerceIn(0, bitmap.height - 1)
 
         val pixel = bitmap.getPixel(bitmapX, bitmapY)
         val color = findClosestColor(Color.red(pixel), Color.green(pixel), Color.blue(pixel))
 
         pickedColors[currentPickingIndex] = color
-        drawMarkerOnImage(bitmapX, bitmapY)
+        markerPoints.add(PointF(bitmapX.toFloat(), bitmapY.toFloat()))
+
+        drawMarkersOnImage()
         updateColorBandsUI()
+
+        // PROMPT ADDED: Ask the user to confirm the match
+        val prompt = "Band ${currentPickingIndex + 1}: ${color.name}. Do the colors match?"
+        Snackbar.make(binding.root, prompt, Snackbar.LENGTH_LONG)
+            .setAction("UNDO") { undoLastPick() }
+            .show()
 
         binding.resultText.text = calculateResistance(pickedColors)
         binding.resultText.visibility = View.VISIBLE
 
         currentPickingIndex++
-        if (currentPickingIndex < 4) {
-            Toast.makeText(this, "Tap Band ${currentPickingIndex + 1}", Toast.LENGTH_SHORT).show()
-        }
     }
 
-    private fun drawMarkerOnImage(x: Int, y: Int) {
-        val currentBitmap = (binding.resultImageView.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap ?: return
-        val mutableBitmap = currentBitmap.copy(Bitmap.Config.ARGB_8888, true)
-        val canvas = Canvas(mutableBitmap)
+    private fun drawMarkersOnImage() {
+        val config = originalBitmap?.config ?: Bitmap.Config.ARGB_8888
+        val cleanCopy = originalBitmap?.copy(config, true) ?: return
+        val canvas = Canvas(cleanCopy)
         val paint = Paint().apply {
             color = Color.CYAN
             style = Paint.Style.STROKE
-            strokeWidth = 5f
+            strokeWidth = 4f
             isAntiAlias = true
         }
-        canvas.drawCircle(x.toFloat(), y.toFloat(), 15f, paint)
-        binding.resultImageView.setImageBitmap(mutableBitmap)
+
+        for (point in markerPoints) {
+            canvas.drawCircle(point.x, point.y, 12f, paint)
+        }
+
+        baseBitmap = cleanCopy
+        binding.resultImageView.setImageBitmap(baseBitmap)
     }
 
     private fun undoLastPick() {
         if (currentPickingIndex > 0) {
             currentPickingIndex--
             pickedColors[currentPickingIndex] = ResistorColor.BODY
-            binding.resultImageView.setImageBitmap(baseBitmap)
+
+            if (markerPoints.isNotEmpty()) {
+                markerPoints.removeAt(markerPoints.size - 1)
+            }
+
+            drawMarkersOnImage()
             updateColorBandsUI()
             binding.resultText.text = calculateResistance(pickedColors)
-            Toast.makeText(this, "Redo Band ${currentPickingIndex + 1}", Toast.LENGTH_SHORT).show()
         }
-    }
-
-    private fun updateColorBandsUI() {
-        val bands = listOf(binding.band1, binding.band2, binding.band3, binding.band4)
-        pickedColors.forEachIndexed { index, color ->
-            bands[index].visibility = if (color == ResistorColor.BODY) View.INVISIBLE else View.VISIBLE
-
-            // Fix 2: Using the standard RGB values for the UI preview bands
-            val rgb = getStandardRGB(color)
-            bands[index].setBackgroundColor(Color.rgb(rgb[0], rgb[1], rgb[2]))
-
-            bands[index].setOnClickListener { showColorPicker(index) }
-        }
-    }
-
-    private fun calculateResistance(colors: List<ResistorColor>): String {
-        val active = colors.filter { it != ResistorColor.BODY }
-        if (active.size < 3) return "Select 3+ bands"
-
-        val d1 = active[0].value
-        val d2 = active[1].value
-        val mult = active[2].multiplier
-        val res = (d1 * 10 + d2) * mult
-
-        val resStr = when {
-            res >= 1_000_000 -> "${res / 1_000_000} MΩ"
-            res >= 1_000 -> "${res / 1_000} kΩ"
-            else -> "$res Ω"
-        }
-
-        val tolerance = if (active.size == 4) " ${active[3].tolerance ?: ""}" else ""
-        return "$resStr$tolerance"
-    }
-
-    private fun startCamera() {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
-            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(binding.viewFinder.surfaceProvider)
-            }
-            imageCapture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                .build()
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
-            } catch (exc: Exception) { Log.e("ScannerApp", "Failed", exc) }
-        }, ContextCompat.getMainExecutor(this))
     }
 
     private fun resetCamera() {
@@ -225,24 +253,50 @@ class MainActivity : AppCompatActivity() {
         binding.colorPreviewContainer.visibility = View.GONE
         binding.captureButton.visibility = View.VISIBLE
         binding.retryButton.visibility = View.GONE
-        binding.undoButton.visibility = View.GONE
-        binding.resultImageView.setOnTouchListener(null)
+        binding.undoButton?.visibility = View.GONE
+
         currentPickingIndex = 0
+        markerPoints.clear()
+        pickedColors.fill(ResistorColor.BODY)
+
+        supportActionBar?.title = "Resistor Scanner"
+        supportActionBar?.subtitle = null
+        matrix.reset()
     }
 
-    private fun cropToReticle(fullBitmap: Bitmap): Bitmap {
-        val cropWidth = (fullBitmap.width * 0.98f).toInt()
-        val cropHeight = (fullBitmap.height * 0.20f).toInt()
-        return Bitmap.createBitmap(fullBitmap, (fullBitmap.width - cropWidth) / 2, (fullBitmap.height - cropHeight) / 2, cropWidth, cropHeight)
+    private fun calculateResistance(colors: List<ResistorColor>): String {
+        val active = colors.filter { it != ResistorColor.BODY }
+        if (active.size < 3) return "Select 3+ bands"
+        val d1 = active[0].value
+        val d2 = active[1].value
+        val mult = active[2].multiplier
+        val res = (d1 * 10 + d2) * mult
+        val resStr = when {
+            res >= 1_000_000 -> "${res / 1_000_000} MΩ"
+            res >= 1_000 -> "${res / 1_000} kΩ"
+            else -> "$res Ω"
+        }
+        val tolerance = if (active.size == 4) " ${active[3].tolerance ?: ""}" else ""
+        return "$resStr$tolerance"
     }
 
-    private fun allPermissionsGranted() = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    private fun updateColorBandsUI() {
+        val bands = listOf(binding.band1, binding.band2, binding.band3, binding.band4)
+        pickedColors.forEachIndexed { index, color ->
+            bands[index].visibility = if (color == ResistorColor.BODY) View.INVISIBLE else View.VISIBLE
+            val rgb = getStandardRGB(color)
+            bands[index].setBackgroundColor(Color.rgb(rgb[0], rgb[1], rgb[2]))
+
+            // Allow manual correction by clicking the band preview
+            bands[index].setOnClickListener { showColorPicker(index) }
+        }
+    }
 
     private fun showColorPicker(index: Int) {
         val options = ResistorColor.entries.filter { it != ResistorColor.BODY }
         val names = options.map { it.name }.toTypedArray()
         android.app.AlertDialog.Builder(this)
-            .setTitle("Correct Band ${index + 1}")
+            .setTitle("Does the color match? Correct it below:")
             .setItems(names) { _, which ->
                 pickedColors[index] = options[which]
                 updateColorBandsUI()
@@ -255,13 +309,9 @@ class MainActivity : AppCompatActivity() {
         Color.RGBToHSV(r, g, b, hsv)
         val hue = hsv[0]; val sat = hsv[1]; val value = hsv[2]
 
-        // Fix 1: Refined detection for Black, White, Grey, and Silver
         if (value < 0.25f) return ResistorColor.BLACK
-        if (sat < 0.15f) {
-            return if (value > 0.85f) ResistorColor.WHITE else ResistorColor.GREY
-        }
+        if (sat < 0.15f) return if (value > 0.85f) ResistorColor.WHITE else ResistorColor.GREY
         if (sat < 0.25f && value > 0.5f && value < 0.85f) return ResistorColor.SILVER
-
         if (hue in 10f..35f && value < 0.45f) return ResistorColor.BROWN
         if (hue in 35f..55f && sat > 0.4f && value > 0.4f && value < 0.85f) return ResistorColor.GOLD
 
@@ -290,11 +340,51 @@ class MainActivity : AppCompatActivity() {
             ResistorColor.WHITE -> intArrayOf(255, 255, 255)
             ResistorColor.GOLD -> intArrayOf(212, 175, 55)
             ResistorColor.SILVER -> intArrayOf(192, 192, 192)
-            else -> intArrayOf(60, 60, 60) // Neutral dark grey for BODY
+            else -> intArrayOf(60, 60, 60)
         }
     }
-}
 
+    private fun startCamera() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+        cameraProviderFuture.addListener({
+            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
+            val preview = Preview.Builder().build().also {
+                it.setSurfaceProvider(binding.viewFinder.surfaceProvider)
+            }
+            imageCapture = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .build()
+            try {
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
+            } catch (exc: Exception) { Log.e("ScannerApp", "Failed", exc) }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun cropToReticle(fullBitmap: Bitmap): Bitmap {
+        val cropWidth = (fullBitmap.width * 0.98f).toInt()
+        val cropHeight = (fullBitmap.height * 0.20f).toInt()
+        return Bitmap.createBitmap(fullBitmap, (fullBitmap.width - cropWidth) / 2, (fullBitmap.height - cropHeight) / 2, cropWidth, cropHeight)
+    }
+
+    private fun allPermissionsGranted() = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+    private fun spacing(event: MotionEvent): Float {
+        val x = event.getX(0) - event.getX(1)
+        val y = event.getY(0) - event.getY(1)
+        return Math.sqrt((x * x + y * y).toDouble()).toFloat()
+    }
+
+    private fun midPoint(point: PointF, event: MotionEvent) {
+        val x = event.getX(0) + event.getX(1)
+        val y = event.getY(0) + event.getY(1)
+        point.set(x / 2, y / 2)
+    }
+
+    private fun distance(x1: Float, y1: Float, x2: Float, y2: Float): Float {
+        return Math.sqrt(((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2)).toDouble()).toFloat()
+    }
+}
 fun ImageProxy.toCorrectBitmap(): Bitmap {
     val buffer = planes[0].buffer
     val bytes = ByteArray(buffer.remaining())

@@ -12,8 +12,8 @@ class ChartActivity : AppCompatActivity() {
         setContentView(R.layout.activity_chart)
 
         supportActionBar?.apply {
-            title = "Resistor Reference"
-            setDisplayHomeAsUpEnabled(true)
+            title = "Resistor Color Code Reference" // Clear location header
+            setDisplayHomeAsUpEnabled(true) // Show the back arrow
         }
 
         // Get the colors passed from MainActivity
@@ -43,6 +43,8 @@ class ChartActivity : AppCompatActivity() {
             "GREEN" -> R.id.rowGreen
             "BLUE" -> R.id.rowBlue
             "VIOLET" -> R.id.rowViolet
+            "GREY" -> R.id.rowGrey
+            "WHITE" -> R.id.rowWhite
             "GOLD" -> R.id.rowGold
             "SILVER" -> R.id.rowSilver
             else -> null
